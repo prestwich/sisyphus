@@ -1,7 +1,11 @@
 use tokio::sync::mpsc;
 
+/// PipeError indicates that either the upstream or downstream channels have
+/// closed
 pub enum PipeError {
+    /// Upstream have all closed
     InboundGone,
+    /// Downstream have all closed
     OutboundGone,
 }
 
@@ -29,6 +33,7 @@ impl<T> Pipe<T>
 where
     T: std::fmt::Debug + Send + Sync + 'static,
 {
+    /// Instantiate a new pipe from an inbound receiver and outbound sender
     pub fn new(rx: mpsc::Receiver<T>, tx: mpsc::Sender<T>, contents: Option<T>) -> Self {
         Self { rx, tx, contents }
     }

@@ -15,14 +15,32 @@ use tokio::{
 
 use crate::utils;
 
+/// An error when pushing a `Boulder`
+///
+/// ## Tracing
+///
+/// Recoverable errors will be traced at `DEBUG`. These are considered normal
+/// program execution, and indicate temporary failures like a rate-limit
+///
+/// Exceptional unrecoverable errors will be traced at `ERROR` level, while
+/// unexceptional errors will be traced at `TRACE`. Unexceptional errors are
+/// typically program lifecycle events. E.g. a task cancellation, shutdown
+/// signal, upstream or downstream pipe failure (indicating another task has
+/// permanently dropped its pipe), &c.
 #[derive(Debug)]
 pub enum Fall<T> {
+    /// A recoverable issue
     Recoverable {
+        /// The task that triggered the issue, for re-spawning
         task: T,
+        /// The issue that triggered the fall
         err: eyre::Report,
     },
+    /// An unrecoverable issue
     Unrecoverable {
+        /// Whether it should be considered exceptional.
         worth_logging: bool,
+        /// The issue that triggered the fall
         err: eyre::Report,
     },
 }
@@ -67,7 +85,7 @@ impl std::fmt::Display for TaskStatus {
 ///       recoverable error, and will resume running shortly
 ///     - `Stopped(eyre::Report)` - indicates that the task encountered an
 ///       unrecoverable will not resume running.
-///     - Panicked - indicates that the task has panicked, and will not resume
+///     - `Panicked` - indicates that the task has panicked, and will not resume
 ///       running
 pub struct Sisyphus {
     pub(crate) restarts: Arc<AtomicUsize>,
@@ -123,8 +141,9 @@ impl IntoFuture for Sisyphus {
     }
 }
 
-/// Convenience trait for conerting errors to `Fall`
+/// Convenience trait for conerting errors to [`Fall`]
 pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
+    /// Convert an error to a recoverable [`Fall`]
     fn recoverable<Task>(self, task: Task) -> Fall<Task>
     where
         Task: Boulder,
@@ -135,6 +154,7 @@ pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
         }
     }
 
+    /// Convert an error to an unrecoverable [`Fall`]
     fn unrecoverable<Task>(self, worth_logging: bool) -> Fall<Task>
     where
         Task: Boulder,
@@ -145,6 +165,7 @@ pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
         }
     }
 
+    /// Convert an error to an exceptional, unrecoverable [`Fall`]
     fn log_unrecoverable<Task>(self) -> Fall<Task>
     where
         Task: Boulder,
@@ -152,6 +173,7 @@ pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
         self.unrecoverable(true)
     }
 
+    /// Convert an error to an unexcpetional, unrecoverable [`Fall`]
     fn silent_unrecoverable<Task>(self) -> Fall<Task>
     where
         Task: Boulder,
@@ -162,6 +184,7 @@ pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
 
 impl<T> ErrExt for T where T: std::error::Error + Send + Sync + 'static {}
 
+/// A looping, fallible task
 pub trait Boulder: std::fmt::Display + Sized {
     /// Defaults to 15 seconds. Can be overridden with arbitrary behavior
     fn restart_after_ms(&self) -> u64 {
@@ -212,15 +235,16 @@ pub trait Boulder: std::fmt::Display + Sized {
                     result = &mut handle => {
                         let again = match result {
                             Ok(Fall::Recoverable { task, err }) => {
-                                tracing::warn!(
-                                    error = %err,
-                                    task = task_description.as_str(),
-                                    "Restarting task",
-                                );
                                 // Sisyphus has been dropped, so we can drop this task
+                                let e_string = err.to_string();
                                 if tx.send(TaskStatus::Recovering(err)).is_err() {
                                     break;
                                 }
+                                tracing::debug!(
+                                    error = e_string.to_string(),
+                                    task = task_description.as_str(),
+                                    "Restarting task",
+                                );
                                 task
                             }
 

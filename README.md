@@ -32,11 +32,11 @@ tokio::spawn(
   - `Boulder` s may define custom recovery or cleanup logic
   - `Boulder` s may also panic. In that case, no `Fall` is generated, and the
     - panic is propagated upward
-  - `Sisyphus` manages a `Boulder` as it runs. It exposes an interface to
-    observe its status and abort it
+  - `Sisyphus` manages a `Boulder` loop. He exposes an interface to observe its
+    status and abort the work
 
 - Pipe
-  - A pair of channels
+  - An inbound and an outbound channel
   - Enforce process-once semantics
   - Prevents data loss on worker error
   - Designed for relatively linear data-processing pipelines
