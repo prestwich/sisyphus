@@ -1,0 +1,17 @@
+[package]
+name = "sisyphus"
+version = "0.1.0"
+edition = "2021"
+authors = ["James Prestwich <james@prestwi.ch>"]
+description = "Reusable utils for long-lived, worker-oriented rust programs"
+license = "Apache-2.0 OR MIT"
+
+[dependencies]
+eyre = "0.6.8"
+rand = "0.8.5"
+tokio = { version = "1.22.0", features = ["macros", "rt", "time", "sync"] }
+tokio-stream = "0.1.11"
+tracing = "0.1.37"
+
+[dev-dependencies]
+tracing-test = "0.2.3"
