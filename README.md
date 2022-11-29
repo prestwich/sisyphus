@@ -19,7 +19,22 @@ tokio::spawn(
 ### Current Utils:
 
 - Sisyphus
+
   - A scaffolding system for spawning long-lived, recoverable tasks
+  - A `Boulder` is a looping, fallible task
+  - `Boulder` logic is defined in a `Boulder::spawn()` method that returns a
+    `JoinHandle`
+  - A `Fall` is an error in that task.
+    - `Fall::Recoverable` - errors that the task believes it can recover
+    - `Fall::Unrecoverable` - errors that the task believes it cannot recover
+  - The `Boulder::run_until_panic` method handles restarting on recoverable
+    `Fall` s, and reporting unrecoverable errors
+  - `Boulder` s may define custom recovery or cleanup logic
+  - `Boulder` s may also panic. In that case, no `Fall` is generated, and the
+    - panic is propagated upward
+  - `Sisyphus` manages a `Boulder` as it runs. It exposes an interface to
+    observe its status and abort it
+
 - Pipe
   - A pair of channels
   - Enforce process-once semantics
