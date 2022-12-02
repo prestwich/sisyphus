@@ -7,13 +7,17 @@ This library contains code I wrote, found useful, and want to keep using. It aim
 The general idiom is focused on spawning long-lived worker loops, which use channels to communicate.
 
 ```rust
-tokio::spawn(
-  async move {
-    while let Some(item) = pipe.next().await {
-      // work happens here :)
-    }
+impl Boulder for MyWorkerTask {
+  fn spawn(self) -> JoinHandle<Fall<Self>> {
+    tokio::spawn(async move {
+      while let Some(item) = self.pipe.next().await {
+        // work happens here :)
+      }
+    });
   }
-);
+}
+
+let task = MyWorkerTask::new().run_forever();
 ```
 
 ### Current Utils:
