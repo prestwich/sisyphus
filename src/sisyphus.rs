@@ -17,6 +17,12 @@ use crate::utils;
 
 /// An error when pushing a `Boulder`
 ///
+/// ## Recoverability
+///
+/// [`Boulder`]s explicitly mark themselves as `Recoverable` or `Unrecoverable`
+/// and further mark unrecoverable errors as `exceptional`, and no outside
+/// runner is required to guess or attempt to handle errors.
+///
 /// ## Tracing
 ///
 /// Recoverable errors will be traced at `DEBUG`. These are considered normal
@@ -39,7 +45,7 @@ pub enum Fall<T> {
     /// An unrecoverable issue
     Unrecoverable {
         /// Whether it should be considered exceptional.
-        worth_logging: bool,
+        exceptional: bool,
         /// The issue that triggered the fall
         err: eyre::Report,
     },
@@ -55,7 +61,12 @@ pub enum TaskStatus {
     /// Task is waiting to resume running
     Recovering(eyre::Report),
     /// Task is stopped, and will not resume
-    Stopped(eyre::Report),
+    Stopped {
+        /// Whether the error is exceptional, or normal lifecycle
+        exceptional: bool,
+        /// The error that triggered the stop
+        err: eyre::Report,
+    },
     /// Task has panicked
     Panicked,
 }
@@ -66,7 +77,12 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Starting => write!(f, "Starting"),
             TaskStatus::Running => write!(f, "Running"),
             TaskStatus::Recovering(e) => write!(f, "Restarting:\n{}", e),
-            TaskStatus::Stopped(e) => write!(f, "Stopped:\n{}", e),
+            TaskStatus::Stopped { exceptional, err } => write!(
+                f,
+                "Stopped:\n{}{}",
+                if *exceptional { "exceptional\n" } else { "" },
+                err,
+            ),
             TaskStatus::Panicked => write!(f, "Panicked"),
         }
     }
@@ -75,7 +91,11 @@ impl std::fmt::Display for TaskStatus {
 /// A wrapper around a task that should run forever.
 ///
 /// It exposes an interface for gracefully shutting down the task, as well as
-/// inspecting the task's state.
+/// inspecting the task's state. Sisyphus tasks do NOT produce an output. If you
+/// would like to extract data from the task, make sure that your `Boulder`
+/// includes a channel
+///
+/// ### Lifecycle
 ///
 /// Sisyphus tasks follow a simple lifecycle:
 /// - Before the task has commenced work it is `Starting`
@@ -87,6 +107,20 @@ impl std::fmt::Display for TaskStatus {
 ///       unrecoverable will not resume running.
 ///     - `Panicked` - indicates that the task has panicked, and will not resume
 ///       running
+///
+/// ### Why `eyre::Report`? Why not an associated `Error` type?
+///
+/// A [`Boulder`] is opaque to the environment relying on it. Its lifecycle
+/// should be managed by its internal crash+recovery loop. Associated error
+/// types add significant complexity to the management system (e.g. adding an
+/// error output would require a generic trait bound as follows:
+/// `Sisyphus<T: Boulder> { _phantom: PhantomData<T>}`
+///
+/// To avoid code complexity AND prevent developers from interfering in the
+/// lifecycle of the task, we do not allow easy error handling. In other words,
+/// errors are intended to be either ignored or traced, never handled. Because
+/// its errors are not intended to be handled, we do not expose them to the
+/// outside world.
 pub struct Sisyphus {
     pub(crate) restarts: Arc<AtomicUsize>,
     // TODO: anything else we want out?
@@ -155,12 +189,12 @@ pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
     }
 
     /// Convert an error to an unrecoverable [`Fall`]
-    fn unrecoverable<Task>(self, worth_logging: bool) -> Fall<Task>
+    fn unrecoverable<Task>(self, exceptional: bool) -> Fall<Task>
     where
         Task: Boulder,
     {
         Fall::Unrecoverable {
-            worth_logging,
+            exceptional,
             err: eyre::eyre!(self),
         }
     }
@@ -201,11 +235,12 @@ pub trait Boulder: std::fmt::Display + Sized {
     where
         Self: 'static + Send + Sync + Sized;
 
-    /// Clean up the task state
-    fn cleanup(&self);
+    /// Clean up the task state. This method will be called by the loop when
+    /// the task is shutting down due to an unrecoverable error
+    fn cleanup(&mut self) {}
 
     /// Perform any cleanup required to reboot the task
-    fn recover(&self);
+    fn recover(&mut self) {}
 
     /// Run the task until it panics. Errors result in a task restart with the
     /// same channels. This means that an error causes the task to lose only
@@ -248,8 +283,8 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 task
                             }
 
-                            Ok(Fall::Unrecoverable { err, worth_logging }) => {
-                                if worth_logging {
+                            Ok(Fall::Unrecoverable { err, exceptional }) => {
+                                if exceptional {
                                     tracing::error!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
                                 } else {
                                     tracing::trace!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
@@ -257,7 +292,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
-                                let _ = tx.send(TaskStatus::Stopped(err));
+                                let _ = tx.send(TaskStatus::Stopped{exceptional, err});
                                 break;
                             }
 
@@ -272,7 +307,11 @@ pub trait Boulder: std::fmt::Display + Sized {
                                     // We don't check the result of the send
                                     // because we're stopping regardless of
                                     // whether it worked
-                                    let _ = tx.send(TaskStatus::Stopped(eyre::eyre!(panic_res.unwrap_err())));
+                                    let status = TaskStatus::Stopped{
+                                        exceptional: false,
+                                        err:eyre::eyre!(panic_res.unwrap_err())
+                                    };
+                                    let _ = tx.send(status);
                                     break;
                                 }
                                 // We don't check the result of the send
@@ -315,9 +354,9 @@ pub(crate) mod test {
     }
 
     impl Boulder for RecoverableTask {
-        fn recover(&self) {}
+        fn recover(&mut self) {}
 
-        fn cleanup(&self) {}
+        fn cleanup(&mut self) {}
 
         fn spawn(self) -> JoinHandle<Fall<Self>>
         where
@@ -354,9 +393,9 @@ pub(crate) mod test {
     }
 
     impl Boulder for UnrecoverableTask {
-        fn recover(&self) {}
+        fn recover(&mut self) {}
 
-        fn cleanup(&self) {}
+        fn cleanup(&mut self) {}
 
         fn spawn(self) -> JoinHandle<Fall<Self>>
         where
@@ -365,7 +404,7 @@ pub(crate) mod test {
             tokio::spawn(async move {
                 Fall::Unrecoverable {
                     err: eyre::eyre!("This error was unrecoverable"),
-                    worth_logging: true,
+                    exceptional: true,
                 }
             })
         }
@@ -390,9 +429,9 @@ pub(crate) mod test {
     }
 
     impl Boulder for PanicTask {
-        fn recover(&self) {}
+        fn recover(&mut self) {}
 
-        fn cleanup(&self) {}
+        fn cleanup(&mut self) {}
 
         fn spawn(self) -> JoinHandle<Fall<Self>>
         where

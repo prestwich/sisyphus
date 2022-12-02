@@ -23,3 +23,6 @@ pub mod pipe;
 pub mod sisyphus;
 /// Crate utils
 mod utils;
+
+pub use pipe::{Pipe, PipeError};
+pub use sisyphus::{Boulder, Fall, Sisyphus};
