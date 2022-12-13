@@ -8,10 +8,12 @@ license = "Apache-2.0 OR MIT"
 
 [dependencies]
 eyre = "0.6.8"
+prometheus = "0.13.3"
 rand = "0.8.5"
 tokio = { version = "1.22.0", features = ["macros", "rt", "time", "sync"] }
 tokio-stream = "0.1.11"
 tracing = "0.1.37"
+warp = "0.3.3"
 
 [dev-dependencies]
 tracing-test = "0.2.3"

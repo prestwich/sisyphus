@@ -342,112 +342,112 @@ pub trait Boulder: std::fmt::Display + Sized {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test {
-    use super::*;
+// #[cfg(test)]
+// pub(crate) mod test {
+//     use super::*;
 
-    struct RecoverableTask;
-    impl std::fmt::Display for RecoverableTask {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "RecoverableTask")
-        }
-    }
+//     struct RecoverableTask;
+//     impl std::fmt::Display for RecoverableTask {
+//         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//             write!(f, "RecoverableTask")
+//         }
+//     }
 
-    impl Boulder for RecoverableTask {
-        fn recover(&mut self) {}
+//     impl Boulder for RecoverableTask {
+//         fn recover(&mut self) {}
 
-        fn cleanup(&mut self) {}
+//         fn cleanup(&mut self) {}
 
-        fn spawn(self) -> JoinHandle<Fall<Self>>
-        where
-            Self: 'static + Send + Sync + Sized,
-        {
-            tokio::spawn(async move {
-                Fall::Recoverable {
-                    task: self,
-                    err: eyre::eyre!("This error was recoverable"),
-                }
-            })
-        }
-    }
+//         fn spawn(self) -> JoinHandle<Fall<Self>>
+//         where
+//             Self: 'static + Send + Sync + Sized,
+//         {
+//             tokio::spawn(async move {
+//                 Fall::Recoverable {
+//                     task: self,
+//                     err: eyre::eyre!("This error was recoverable"),
+//                 }
+//             })
+//         }
+//     }
 
-    #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_recovery() {
-        let handle = RecoverableTask.run_until_panic();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let handle = handle.shutdown();
-        let result = handle.await;
+//     #[tokio::test]
+//     #[tracing_test::traced_test]
+//     async fn test_recovery() {
+//         let handle = RecoverableTask.run_until_panic();
+//         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+//         let handle = handle.shutdown();
+//         let result = handle.await;
 
-        assert!(logs_contain("RecoverableTask"));
-        assert!(logs_contain("Restarting task"));
-        assert!(logs_contain("This error was recoverable"));
-        assert!(result.is_ok());
-    }
+//         assert!(logs_contain("RecoverableTask"));
+//         assert!(logs_contain("Restarting task"));
+//         assert!(logs_contain("This error was recoverable"));
+//         assert!(result.is_ok());
+//     }
 
-    struct UnrecoverableTask;
-    impl std::fmt::Display for UnrecoverableTask {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "UnrecoverableTask")
-        }
-    }
+//     struct UnrecoverableTask;
+//     impl std::fmt::Display for UnrecoverableTask {
+//         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//             write!(f, "UnrecoverableTask")
+//         }
+//     }
 
-    impl Boulder for UnrecoverableTask {
-        fn recover(&mut self) {}
+//     impl Boulder for UnrecoverableTask {
+//         fn recover(&mut self) {}
 
-        fn cleanup(&mut self) {}
+//         fn cleanup(&mut self) {}
 
-        fn spawn(self) -> JoinHandle<Fall<Self>>
-        where
-            Self: 'static + Send + Sync + Sized,
-        {
-            tokio::spawn(async move {
-                Fall::Unrecoverable {
-                    err: eyre::eyre!("This error was unrecoverable"),
-                    exceptional: true,
-                }
-            })
-        }
-    }
+//         fn spawn(self) -> JoinHandle<Fall<Self>>
+//         where
+//             Self: 'static + Send + Sync + Sized,
+//         {
+//             tokio::spawn(async move {
+//                 Fall::Unrecoverable {
+//                     err: eyre::eyre!("This error was unrecoverable"),
+//                     exceptional: true,
+//                 }
+//             })
+//         }
+//     }
 
-    #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_unrecoverable() {
-        let handle = UnrecoverableTask.run_until_panic();
-        let result = handle.await;
-        assert!(logs_contain("UnrecoverableTask"));
-        assert!(logs_contain("Unrecoverable error encountered"));
-        assert!(logs_contain("This error was unrecoverable"));
-        assert!(result.is_ok());
-    }
+//     #[tokio::test]
+//     #[tracing_test::traced_test]
+//     async fn test_unrecoverable() {
+//         let handle = UnrecoverableTask.run_until_panic();
+//         let result = handle.await;
+//         assert!(logs_contain("UnrecoverableTask"));
+//         assert!(logs_contain("Unrecoverable error encountered"));
+//         assert!(logs_contain("This error was unrecoverable"));
+//         assert!(result.is_ok());
+//     }
 
-    struct PanicTask;
-    impl std::fmt::Display for PanicTask {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "PanicTask")
-        }
-    }
+//     struct PanicTask;
+//     impl std::fmt::Display for PanicTask {
+//         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//             write!(f, "PanicTask")
+//         }
+//     }
 
-    impl Boulder for PanicTask {
-        fn recover(&mut self) {}
+//     impl Boulder for PanicTask {
+//         fn recover(&mut self) {}
 
-        fn cleanup(&mut self) {}
+//         fn cleanup(&mut self) {}
 
-        fn spawn(self) -> JoinHandle<Fall<Self>>
-        where
-            Self: 'static + Send + Sync + Sized,
-        {
-            tokio::spawn(async move { panic!("intentional panic :)") })
-        }
-    }
+//         fn spawn(self) -> JoinHandle<Fall<Self>>
+//         where
+//             Self: 'static + Send + Sync + Sized,
+//         {
+//             tokio::spawn(async move { panic!("intentional panic :)") })
+//         }
+//     }
 
-    #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_panic() {
-        let handle = PanicTask.run_until_panic();
-        let result = handle.await;
-        assert!(logs_contain("PanicTask"));
-        assert!(logs_contain("Internal task panicked"));
-        assert!(result.is_err() && result.unwrap_err().is_panic());
-    }
-}
+//     #[tokio::test]
+//     #[tracing_test::traced_test]
+//     async fn test_panic() {
+//         let handle = PanicTask.run_until_panic();
+//         let result = handle.await;
+//         assert!(logs_contain("PanicTask"));
+//         assert!(logs_contain("Internal task panicked"));
+//         assert!(result.is_err() && result.unwrap_err().is_panic());
+//     }
+// }

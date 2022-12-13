@@ -25,6 +25,8 @@
 //! let task = MyWorkerTask::new().run_forever();
 //! ```
 
+/// Simple Prometheus metrics
+pub mod metrics;
 /// Pipe with process-once semantics
 pub mod pipe;
 /// Resumable, never-ending, tasks
@@ -32,5 +34,5 @@ pub mod sisyphus;
 /// Crate-internal utils
 mod utils;
 
+pub use crate::sisyphus::{Boulder, Fall, Sisyphus};
 pub use pipe::{Pipe, PipeError};
-pub use sisyphus::{Boulder, Fall, Sisyphus};
