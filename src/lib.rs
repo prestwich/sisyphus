@@ -25,7 +25,6 @@
 //! let task = MyWorkerTask::new().run_forever();
 //! ```
 
-/// Simple Prometheus metrics
 pub mod metrics;
 /// Pipe with process-once semantics
 pub mod pipe;
