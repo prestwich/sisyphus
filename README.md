@@ -6,18 +6,30 @@ This library contains code I wrote, found useful, and want to keep using. It aim
 
 The general idiom is focused on spawning long-lived worker loops, which use channels to communicate.
 
+### Understanding this crate
+
+### High Level Example
+
 ```rust
-impl Boulder for MyWorkerTask {
+pub struct MyWorker{
+  pipe: Pipe<WorkItem>,
+}
+
+impl Boulder for MyWorker {
   fn spawn(self) -> JoinHandle<Fall<Self>> {
     tokio::spawn(async move {
+      // pipe gives refs to items
       while let Some(item) = self.pipe.next().await {
-        // work happens here :)
+        // worker does work on each item as it becomes available
+        self.do_work_on(item);
+        // do some async work too :)
+        self.async_work_as_well(item).await;
       }
     });
   }
 }
 
-let task = MyWorkerTask::new().run_forever();
+let task = MyWorker::new(a_pipe).run_forever();
 ```
 
 ### Current Utils:

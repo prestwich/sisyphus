@@ -1,6 +1,7 @@
 use std::{
-    future::IntoFuture,
+    future::{Future, IntoFuture},
     panic,
+    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -132,7 +133,7 @@ pub struct Sisyphus {
 }
 
 impl Sisyphus {
-    /// Issue a shutdown command to the task, allowing it to clean up any state.
+    /// Issue a shutdown command to the task.
     ///
     /// This sends a shutdown command to the relevant task.
     ///
@@ -141,13 +142,6 @@ impl Sisyphus {
     /// The `JoinHandle` to the task, so it can be awaited (if necessary).
     pub fn shutdown(self) -> JoinHandle<()> {
         let _ = self.shutdown.send(());
-        self.task
-    }
-
-    /// Cancel the task forcefully. This uses tokio's abort, and does not allow
-    /// the task to run any cleanup.
-    pub fn abort(self) -> JoinHandle<()> {
-        self.task.abort();
         self.task
     }
 
@@ -238,14 +232,18 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to clean up resources on
     /// an unrecoverable error
-    fn cleanup(&mut self) {}
+    fn cleanup(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {})
+    }
 
     /// Perform any work required to reboot the task. This method will be
     /// called by the loop when the task has encountered a recoverable error.
     ///
     /// Override this function if your task needs to adjust its state when
     /// hitting a recoverable error
-    fn recover(&mut self) {}
+    fn recover(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {})
+    }
 
     /// Run the task until it panics. Errors result in a task restart with the
     /// same channels. This means that an error causes the task to lose only
@@ -270,6 +268,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                 select! {
                     biased;
                     _ = &mut shutdown_recv => {
+                        handle.abort();
                         break;
                     },
                     result = &mut handle => {
@@ -280,7 +279,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 if tx.send(TaskStatus::Recovering(err)).is_err() {
                                     break;
                                 }
-                                task.recover();
+                                task.recover().await;
                                 tracing::debug!(
                                     error = e_string.to_string(),
                                     task = task_description.as_str(),
@@ -295,7 +294,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 } else {
                                     tracing::trace!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
                                 }
-                                task.cleanup();
+                                task.cleanup().await;
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
@@ -334,7 +333,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                         // We use a noisy sleep here to nudge tasks off
                         // eachother if they're crashing around the same time
                         utils::noisy_sleep(again.restart_after_ms()).await;
-                        // If we haven't broken from within th match, increment
+                        // If we haven't broken from within the match, increment
                         // restarts and push the boulder again.
                         restarts_loop_ref.fetch_add(1, Ordering::Relaxed);
                         *handle = again.spawn();
