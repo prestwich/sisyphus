@@ -48,6 +48,8 @@ pub enum Fall<T> {
         exceptional: bool,
         /// The issue that triggered the fall
         err: eyre::Report,
+        /// The task that triggered the issue
+        task: T,
     },
 }
 
@@ -132,12 +134,7 @@ pub struct Sisyphus {
 impl Sisyphus {
     /// Issue a shutdown command to the task, allowing it to clean up any state.
     ///
-    /// This sends a shutdown command to the relevant task. If this command is
-    /// received before an unrecoverable erorr is encountered, then the task
-    /// will execute its `cleanup()` function and gracefully exit.
-    ///
-    /// If an unrecoverable error is encountered before the signal, then the
-    /// `cleanup()` will not run.
+    /// This sends a shutdown command to the relevant task.
     ///
     /// ### Returns
     ///
@@ -189,30 +186,31 @@ pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
     }
 
     /// Convert an error to an unrecoverable [`Fall`]
-    fn unrecoverable<Task>(self, exceptional: bool) -> Fall<Task>
+    fn unrecoverable<Task>(self, task: Task, exceptional: bool) -> Fall<Task>
     where
         Task: Boulder,
     {
         Fall::Unrecoverable {
             exceptional,
             err: eyre::eyre!(self),
+            task,
         }
     }
 
     /// Convert an error to an exceptional, unrecoverable [`Fall`]
-    fn log_unrecoverable<Task>(self) -> Fall<Task>
+    fn log_unrecoverable<Task>(self, task: Task) -> Fall<Task>
     where
         Task: Boulder,
     {
-        self.unrecoverable(true)
+        self.unrecoverable(task, true)
     }
 
     /// Convert an error to an unexcpetional, unrecoverable [`Fall`]
-    fn silent_unrecoverable<Task>(self) -> Fall<Task>
+    fn silent_unrecoverable<Task>(self, task: Task) -> Fall<Task>
     where
         Task: Boulder,
     {
-        self.unrecoverable(false)
+        self.unrecoverable(task, false)
     }
 }
 
@@ -237,9 +235,16 @@ pub trait Boulder: std::fmt::Display + Sized {
 
     /// Clean up the task state. This method will be called by the loop when
     /// the task is shutting down due to an unrecoverable error
+    ///
+    /// Override this function if your task needs to clean up resources on
+    /// an unrecoverable error
     fn cleanup(&mut self) {}
 
-    /// Perform any cleanup required to reboot the task
+    /// Perform any work required to reboot the task. This method will be
+    /// called by the loop when the task has encountered a recoverable error.
+    ///
+    /// Override this function if your task needs to adjust its state when
+    /// hitting a recoverable error
     fn recover(&mut self) {}
 
     /// Run the task until it panics. Errors result in a task restart with the
@@ -269,12 +274,13 @@ pub trait Boulder: std::fmt::Display + Sized {
                     },
                     result = &mut handle => {
                         let again = match result {
-                            Ok(Fall::Recoverable { task, err }) => {
+                            Ok(Fall::Recoverable { mut task, err }) => {
                                 // Sisyphus has been dropped, so we can drop this task
                                 let e_string = err.to_string();
                                 if tx.send(TaskStatus::Recovering(err)).is_err() {
                                     break;
                                 }
+                                task.recover();
                                 tracing::debug!(
                                     error = e_string.to_string(),
                                     task = task_description.as_str(),
@@ -283,12 +289,13 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 task
                             }
 
-                            Ok(Fall::Unrecoverable { err, exceptional }) => {
+                            Ok(Fall::Unrecoverable { err, exceptional, mut task }) => {
                                 if exceptional {
                                     tracing::error!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
                                 } else {
                                     tracing::trace!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
                                 }
+                                task.cleanup();
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
@@ -324,9 +331,11 @@ pub trait Boulder: std::fmt::Display + Sized {
                             }
                         };
 
-                        // if we haven't broken from within th match, increment
-                        // restarts and push the boulder again
+                        // We use a noisy sleep here to nudge tasks off
+                        // eachother if they're crashing around the same time
                         utils::noisy_sleep(again.restart_after_ms()).await;
+                        // If we haven't broken from within th match, increment
+                        // restarts and push the boulder again.
                         restarts_loop_ref.fetch_add(1, Ordering::Relaxed);
                         *handle = again.spawn();
                     },
