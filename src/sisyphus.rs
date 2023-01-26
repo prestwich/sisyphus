@@ -79,7 +79,7 @@ impl std::fmt::Display for TaskStatus {
         match self {
             TaskStatus::Starting => write!(f, "Starting"),
             TaskStatus::Running => write!(f, "Running"),
-            TaskStatus::Recovering(e) => write!(f, "Restarting:\n{}", e),
+            TaskStatus::Recovering(e) => write!(f, "Restarting:\n{e}"),
             TaskStatus::Stopped { exceptional, err } => write!(
                 f,
                 "Stopped:\n{}{}",
@@ -219,7 +219,7 @@ pub trait Boulder: std::fmt::Display + Sized {
 
     /// A short description of the task, defaults to Display impl
     fn task_description(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 
     /// Perform the task
