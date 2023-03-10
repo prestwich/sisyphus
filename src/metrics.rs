@@ -112,7 +112,7 @@
 //!
 //! // Creates a new gauge, with the label values paramterized
 //! let my_cool_gauge = my_cool_ints.metric(
-//!     ["goodbye", "my_friends", "i_miss_you", "very_much"]
+//!     ["goodbye", "my_friends", "i_will_miss_you", "very_much"]
 //! );
 //!
 //! // Like handles, attempting to make a metric with all the same labels will
@@ -680,7 +680,8 @@ impl Metrics {
     }
 
     /// Simple http server, serving text-encoded metrics on the provided port
-    pub fn serve(self: Arc<Self>, port: u16) -> JoinHandle<()> {
+    pub fn serve(self: &Arc<Self>, port: u16) -> JoinHandle<()> {
+        let this = self.clone();
         tracing::info!(
             port,
             "starting prometheus server on 0.0.0.0:{port}",
@@ -692,7 +693,7 @@ impl Metrics {
                 warp::path!("metrics")
                     .map(move || {
                         warp::reply::with_header(
-                            self.gather_text().expect("failed to encode metrics"),
+                            this.gather_text().expect("failed to encode metrics"),
                             "Content-Type",
                             // OpenMetrics specs demands "application/openmetrics-text; version=1.0.0; charset=utf-8"
                             // but the prometheus scraper itself doesn't seem to care?
