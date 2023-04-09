@@ -42,6 +42,8 @@ pub enum Fall<T> {
         task: T,
         /// The issue that triggered the fall
         err: eyre::Report,
+        /// The shutdown channel, for gracefully shutting down the task
+        shutdown_recv: oneshot::Receiver<()>,
     },
     /// An unrecoverable issue
     Unrecoverable {
@@ -49,6 +51,11 @@ pub enum Fall<T> {
         exceptional: bool,
         /// The issue that triggered the fall
         err: eyre::Report,
+        /// The task that triggered the issue
+        task: T,
+    },
+    /// The signal for shutting down the task has been sent
+    Shutdown {
         /// The task that triggered the issue
         task: T,
     },
@@ -175,12 +182,13 @@ impl IntoFuture for Sisyphus {
 /// Convenience trait for conerting errors to [`Fall`]
 pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
     /// Convert an error to a recoverable [`Fall`]
-    fn recoverable<Task>(self, task: Task) -> Fall<Task>
+    fn recoverable<Task>(self, task: Task, shutdown_recv: oneshot::Receiver<()>) -> Fall<Task>
     where
         Task: Boulder,
     {
         Fall::Recoverable {
             task,
+            shutdown_recv,
             err: eyre::eyre!(self),
         }
     }
@@ -238,7 +246,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     }
 
     /// Perform the task
-    fn spawn(self) -> JoinHandle<Fall<Self>>
+    fn spawn(self, shutdown: oneshot::Receiver<()>) -> JoinHandle<Fall<Self>>
     where
         Self: 'static + Send + Sync + Sized;
 
@@ -285,19 +293,13 @@ pub trait Boulder: std::fmt::Display + Sized {
 
         let task: JoinHandle<()> = tokio::spawn(async move {
             self.bootstrap(self.first_time(&restarts_loop_ref)).await;
-            let handle = self.spawn();
+            let handle = self.spawn(shutdown_recv);
             tokio::pin!(handle);
-            tokio::pin!(shutdown_recv);
             loop {
                 select! {
-                    biased;
-                    _ = &mut shutdown_recv => {
-                        handle.abort();
-                        break;
-                    },
                     result = &mut handle => {
-                        let again = match result {
-                            Ok(Fall::Recoverable { mut task, err }) => {
+                        let (again, shutdown_recv) = match result {
+                            Ok(Fall::Recoverable { mut task, shutdown_recv, err }) => {
                                 // Sisyphus has been dropped, so we can drop this task
                                 let e_string = err.to_string();
                                 if tx.send(TaskStatus::Recovering(err)).is_err() {
@@ -309,7 +311,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                     task = task_description.as_str(),
                                     "Restarting task",
                                 );
-                                task
+                                (task, shutdown_recv)
                             }
 
                             Ok(Fall::Unrecoverable { err, exceptional, mut task }) => {
@@ -323,6 +325,16 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // because we're stopping regardless of
                                 // whether it worked
                                 let _ = tx.send(TaskStatus::Stopped{exceptional, err});
+                                break;
+                            }
+
+                            Ok(Fall::Shutdown{mut task}) => {
+                                task.cleanup().await;
+                                // We don't check the result of the send
+                                // because we're stopping regardless of
+                                // whether it worked
+                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: eyre::eyre!("Shutdown")});
+                                handle.abort();
                                 break;
                             }
 
@@ -360,7 +372,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                         // If we haven't broken from within the match, increment
                         // restarts and push the boulder again.
                         restarts_loop_ref.fetch_add(1, Ordering::Relaxed);
-                        *handle = again.spawn();
+                        *handle = again.spawn(shutdown_recv);
                     },
                 }
             }
