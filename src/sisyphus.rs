@@ -296,6 +296,8 @@ pub trait Boulder: std::fmt::Display + Sized {
                 .expect("Failed to send task status");
             self.bootstrap(self.first_time(&restarts_loop_ref)).await;
             let handle = self.spawn(shutdown_recv);
+            tx.send(TaskStatus::Running)
+                .expect("Failed to send task status");
             tokio::pin!(handle);
             loop {
                 select! {
