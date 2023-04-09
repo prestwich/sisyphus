@@ -227,6 +227,14 @@ pub trait Boulder: std::fmt::Display + Sized {
     where
         Self: 'static + Send + Sync + Sized;
 
+    /// Bootstrap the task state. This method will be called before the task spawn.
+    ///
+    /// Override this function if your task needs to to boostrap its state before
+    /// running spawn
+    fn bootstrap(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {})
+    }
+
     /// Clean up the task state. This method will be called by the loop when
     /// the task is shutting down due to an unrecoverable error
     ///
@@ -248,7 +256,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     /// Run the task until it panics. Errors result in a task restart with the
     /// same channels. This means that an error causes the task to lose only
     /// the data that is in-scope when it faults.
-    fn run_until_panic(self) -> Sisyphus
+    fn run_until_panic(mut self) -> Sisyphus
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -261,6 +269,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         let restarts_loop_ref = restarts.clone();
 
         let task: JoinHandle<()> = tokio::spawn(async move {
+            self.bootstrap().await;
             let handle = self.spawn();
             tokio::pin!(handle);
             tokio::pin!(shutdown_recv);
