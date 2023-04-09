@@ -222,6 +222,15 @@ pub trait Boulder: std::fmt::Display + Sized {
         format!("{self}")
     }
 
+    /// Returns true if this is the first time the task has run
+    fn first_time(&self, restarts: &Arc<AtomicUsize>) -> bool {
+        if restarts.load(Ordering::Relaxed) == 0 {
+            true
+        } else {
+            false
+        }
+    }
+
     /// Perform the task
     fn spawn(self) -> JoinHandle<Fall<Self>>
     where
@@ -231,7 +240,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to to boostrap its state before
     /// running spawn
-    fn bootstrap(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn bootstrap(&mut self, _first_time: bool) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {})
     }
 
@@ -269,7 +278,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         let restarts_loop_ref = restarts.clone();
 
         let task: JoinHandle<()> = tokio::spawn(async move {
-            self.bootstrap().await;
+            self.bootstrap(self.first_time(&restarts_loop_ref)).await;
             let handle = self.spawn();
             tokio::pin!(handle);
             tokio::pin!(shutdown_recv);
