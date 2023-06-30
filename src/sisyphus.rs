@@ -145,6 +145,12 @@ impl Sisyphus {
         self.task
     }
 
+    /// Wait for the task to change status.
+    /// Errors if the status channel is closed.
+    pub async fn watch_status(&mut self) -> Result<(), watch::error::RecvError> {
+        self.status.changed().await
+    }
+
     /// Return the task's current status
     pub fn status(&self) -> String {
         self.status.borrow().to_string()
