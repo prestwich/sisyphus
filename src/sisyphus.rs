@@ -43,7 +43,7 @@ pub enum Fall<T> {
         /// The issue that triggered the fall
         err: eyre::Report,
         /// The shutdown channel, for gracefully shutting down the task
-        shutdown_recv: oneshot::Receiver<()>,
+        shutdown: ShutdownSignal,
     },
     /// An unrecoverable issue
     Unrecoverable {
@@ -179,16 +179,20 @@ impl IntoFuture for Sisyphus {
     }
 }
 
+#[derive(Debug)]
+/// The shutdown signal for the task
+pub struct ShutdownSignal(oneshot::Receiver<()>);
+
 /// Convenience trait for conerting errors to [`Fall`]
 pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
     /// Convert an error to a recoverable [`Fall`]
-    fn recoverable<Task>(self, task: Task, shutdown_recv: oneshot::Receiver<()>) -> Fall<Task>
+    fn recoverable<Task>(self, task: Task, shutdown: ShutdownSignal) -> Fall<Task>
     where
         Task: Boulder,
     {
         Fall::Recoverable {
             task,
-            shutdown_recv,
+            shutdown,
             err: eyre::eyre!(self),
         }
     }
@@ -246,7 +250,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     }
 
     /// Perform the task
-    fn spawn(self, shutdown: oneshot::Receiver<()>) -> JoinHandle<Fall<Self>>
+    fn spawn(self, shutdown: ShutdownSignal) -> JoinHandle<Fall<Self>>
     where
         Self: 'static + Send + Sync + Sized;
 
@@ -286,8 +290,8 @@ pub trait Boulder: std::fmt::Display + Sized {
         let task_description = self.task_description();
 
         let (tx, rx) = watch::channel(TaskStatus::Starting);
-        let (shutdown, shutdown_recv) = oneshot::channel();
-
+        let (shutdown_tx, shutdown_recv) = oneshot::channel();
+        let shutdown = ShutdownSignal(shutdown_recv);
         let restarts: Arc<AtomicUsize> = Default::default();
         let restarts_loop_ref = restarts.clone();
 
@@ -295,34 +299,37 @@ pub trait Boulder: std::fmt::Display + Sized {
             tx.send(TaskStatus::Running)
                 .expect("Failed to send task status");
             self.bootstrap(self.first_time(&restarts_loop_ref)).await;
-            let handle = self.spawn(shutdown_recv);
+            let handle = self.spawn(shutdown);
             tx.send(TaskStatus::Running)
                 .expect("Failed to send task status");
             tokio::pin!(handle);
             loop {
                 select! {
                     result = &mut handle => {
-                        let (again, shutdown_recv) = match result {
-                            Ok(Fall::Recoverable { mut task, shutdown_recv, err }) => {
+                        let (again, shutdown) = match result {
+                            Ok(Fall::Recoverable { mut task, shutdown, err }) => {
                                 // Sisyphus has been dropped, so we can drop this task
                                 let e_string = err.to_string();
+                                let error_chain= err.chain().map(|e| e.to_string()).collect::<Vec<String>>().join(" --> ");
                                 if tx.send(TaskStatus::Recovering(err)).is_err() {
                                     break;
                                 }
                                 task.recover().await;
-                                tracing::debug!(
+                                tracing::warn!(
                                     error = e_string.to_string(),
                                     task = task_description.as_str(),
-                                    "Restarting task",
+                                    error_chain,
+                                    "Restarting task ↺",
                                 );
-                                (task, shutdown_recv)
+                                (task, shutdown)
                             }
 
                             Ok(Fall::Unrecoverable { err, exceptional, mut task }) => {
+                                let error_chain= err.chain().map(|e| e.to_string()).collect::<Vec<String>>().join(" --> ");
                                 if exceptional {
-                                    tracing::error!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
+                                    tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Exceptional unrecoverable error encountered");
                                 } else {
-                                    tracing::trace!(err = %err, task = task_description.as_str(), "Unrecoverable error encountered");
+                                    tracing::warn!(err = %err, error_chain, task = task_description.as_str(), "Unrecoverable error encountered");
                                 }
                                 task.cleanup().await;
                                 // We don't check the result of the send
@@ -376,7 +383,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                         // If we haven't broken from within the match, increment
                         // restarts and push the boulder again.
                         restarts_loop_ref.fetch_add(1, Ordering::Relaxed);
-                        *handle = again.spawn(shutdown_recv);
+                        *handle = again.spawn(shutdown);
                     },
                 }
             }
@@ -384,7 +391,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         Sisyphus {
             restarts,
             status: rx,
-            shutdown,
+            shutdown: shutdown_tx,
             task,
         }
     }
