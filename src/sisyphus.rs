@@ -292,6 +292,8 @@ pub trait Boulder: std::fmt::Display + Sized {
         let restarts_loop_ref = restarts.clone();
 
         let task: JoinHandle<()> = tokio::spawn(async move {
+            tx.send(TaskStatus::Running)
+                .expect("Failed to send task status");
             self.bootstrap(self.first_time(&restarts_loop_ref)).await;
             let handle = self.spawn(shutdown_recv);
             tokio::pin!(handle);
