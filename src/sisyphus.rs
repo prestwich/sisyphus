@@ -108,15 +108,17 @@ impl std::fmt::Display for TaskStatus {
 /// ### Lifecycle
 ///
 /// Sisyphus tasks follow a simple lifecycle:
-/// - Before the task has commenced work it is `Starting`
+/// - Before the task has commenced work it is `Starting`. At that state, the [`Boulder::bootstrap`] function is called
 /// - Once work has commenced it is `Running`
 /// - If work was interrupted it goes to 1 of 3 states:
 ///     - `Recovering(eyre::Report)` - indeicates that the task encountered a
-///       recoverable error, and will resume running shortly
+///       recoverable error, and will resume running shortly. At that state, the [`Boulder::recover`] function is called
 ///     - `Stopped(eyre::Report)` - indicates that the task encountered an
-///       unrecoverable will not resume running.
+///       unrecoverable will not resume running
 ///     - `Panicked` - indicates that the task has panicked, and will not resume
 ///       running
+/// - If the shutdown signal is received, it goes into `Stopped`. At that state, the
+/// [`Boulder::cleanup`] function is called
 ///
 /// ### Why `eyre::Report`? Why not an associated `Error` type?
 ///
@@ -258,8 +260,11 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to to boostrap its state before
     /// running spawn
-    fn bootstrap(&mut self, _first_time: bool) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {})
+    fn bootstrap(
+        &mut self,
+        _first_time: bool,
+    ) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send + '_>> {
+        Box::pin(async move { Ok(()) })
     }
 
     /// Clean up the task state. This method will be called by the loop when
@@ -267,8 +272,8 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to clean up resources on
     /// an unrecoverable error
-    fn cleanup(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {})
+    fn cleanup(&mut self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send + '_>> {
+        Box::pin(async move { Ok(()) })
     }
 
     /// Perform any work required to reboot the task. This method will be
@@ -296,9 +301,20 @@ pub trait Boulder: std::fmt::Display + Sized {
         let restarts_loop_ref = restarts.clone();
 
         let task: JoinHandle<()> = tokio::spawn(async move {
-            tx.send(TaskStatus::Running)
-                .expect("Failed to send task status");
-            self.bootstrap(self.first_time(&restarts_loop_ref)).await;
+            let res = self.bootstrap(self.first_time(&restarts_loop_ref)).await;
+            if let Err(err) = res {
+                let error_chain = err
+                    .chain()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<String>>()
+                    .join(" --> ");
+                tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Error encountered during bootstrap");
+                let _ = tx.send(TaskStatus::Stopped {
+                    exceptional: true,
+                    err,
+                });
+                return;
+            }
             let handle = self.spawn(shutdown);
             tx.send(TaskStatus::Running)
                 .expect("Failed to send task status");
@@ -331,7 +347,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 } else {
                                     tracing::warn!(err = %err, error_chain, task = task_description.as_str(), "Unrecoverable error encountered");
                                 }
-                                task.cleanup().await;
+                                let _ = task.cleanup().await;
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
@@ -340,7 +356,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                             }
 
                             Ok(Fall::Shutdown{mut task}) => {
-                                task.cleanup().await;
+                                let _ = task.cleanup().await;
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
