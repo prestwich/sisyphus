@@ -6,8 +6,10 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    task::{Context, Poll},
 };
 
+use futures::FutureExt;
 use tokio::{
     select,
     sync::{oneshot, watch},
@@ -185,6 +187,17 @@ impl IntoFuture for Sisyphus {
 /// The shutdown signal for the task
 pub struct ShutdownSignal(oneshot::Receiver<()>);
 
+impl Future for ShutdownSignal {
+    type Output = Result<(), oneshot::error::RecvError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.0.poll_unpin(cx) {
+            Poll::Ready(res) => Poll::Ready(res),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// Convenience trait for conerting errors to [`Fall`]
 pub trait ErrExt: std::error::Error + Sized + Send + Sync + 'static {
     /// Convert an error to a recoverable [`Fall`]
@@ -356,12 +369,15 @@ pub trait Boulder: std::fmt::Display + Sized {
                             }
 
                             Ok(Fall::Shutdown{mut task}) => {
-                                let _ = task.cleanup().await;
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
-                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: eyre::eyre!("Shutdown")});
+                                // abort work
                                 handle.abort();
+                                // then  cleanup
+                                let _ = task.cleanup().await;
+                                // then set status to Stopped
+                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: eyre::eyre!("Shutdown")});
                                 break;
                             }
 
@@ -392,7 +408,6 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 panic::resume_unwind(p);
                             }
                         };
-
                         // We use a noisy sleep here to nudge tasks off
                         // eachother if they're crashing around the same time
                         utils::noisy_sleep(again.restart_after_ms()).await;
