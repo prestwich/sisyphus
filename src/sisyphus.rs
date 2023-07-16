@@ -316,6 +316,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         let task: JoinHandle<()> = tokio::spawn(async move {
             let res = self.bootstrap(self.first_time(&restarts_loop_ref)).await;
             if let Err(err) = res {
+                let _ = self.cleanup().await;
                 let error_chain = err
                     .chain()
                     .map(|e| e.to_string())
