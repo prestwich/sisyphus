@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     future::{Future, IntoFuture},
     panic,
@@ -64,20 +65,20 @@ pub enum Fall<T> {
 }
 
 /// The current state of a Sisyphus task.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TaskStatus {
     /// Task is starting
     Starting,
     /// Task is running
     Running,
     /// Task is waiting to resume running
-    Recovering(eyre::Report),
+    Recovering(Arc<eyre::Report>),
     /// Task is stopped, and will not resume
     Stopped {
         /// Whether the error is exceptional, or normal lifecycle
         exceptional: bool,
         /// The error that triggered the stop
-        err: eyre::Report,
+        err: Arc<eyre::Report>,
     },
     /// Task has panicked
     Panicked,
@@ -158,13 +159,14 @@ impl Sisyphus {
 
     /// Wait for the task to change status.
     /// Errors if the status channel is closed.
-    pub async fn watch_status(&mut self) -> Result<(), watch::error::RecvError> {
-        self.status.changed().await
+    pub async fn watch_status(&mut self) -> Result<TaskStatus, watch::error::RecvError> {
+        self.status.changed().await?;
+        Ok(self.status.borrow().clone())
     }
 
     /// Return the task's current status
-    pub fn status(&self) -> String {
-        self.status.borrow().to_string()
+    pub fn status(&self) -> TaskStatus {
+        self.status.borrow().clone()
     }
 
     /// The number of times the task has restarted
@@ -325,13 +327,13 @@ pub trait Boulder: std::fmt::Display + Sized {
                 tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Error encountered during bootstrap");
                 let _ = tx.send(TaskStatus::Stopped {
                     exceptional: true,
-                    err,
+                    err: Arc::new(err),
                 });
                 return;
             }
             let handle = self.spawn(shutdown);
-            tx.send(TaskStatus::Running)
-                .expect("Failed to send task status");
+            // tx.send(TaskStatus::Running)
+            //     .expect("Failed to send task status");
             tokio::pin!(handle);
             loop {
                 select! {
@@ -341,7 +343,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // Sisyphus has been dropped, so we can drop this task
                                 let e_string = err.to_string();
                                 let error_chain= err.chain().map(|e| e.to_string()).collect::<Vec<String>>().join(" --> ");
-                                if tx.send(TaskStatus::Recovering(err)).is_err() {
+                                if tx.send(TaskStatus::Recovering(Arc::new(err))).is_err() {
                                     break;
                                 }
                                 task.recover().await;
@@ -365,7 +367,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
-                                let _ = tx.send(TaskStatus::Stopped{exceptional, err});
+                                let _ = tx.send(TaskStatus::Stopped{exceptional, err: Arc::new(err) });
                                 break;
                             }
 
@@ -378,7 +380,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // then  cleanup
                                 let _ = task.cleanup().await;
                                 // then set status to Stopped
-                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: eyre::eyre!("Shutdown")});
+                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: Arc::new(eyre::eyre!("Shutdown"))});
                                 break;
                             }
 
@@ -395,7 +397,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                     // whether it worked
                                     let status = TaskStatus::Stopped{
                                         exceptional: false,
-                                        err:eyre::eyre!(panic_res.unwrap_err())
+                                        err:Arc::new(eyre::eyre!(panic_res.unwrap_err()))
                                     };
                                     let _ = tx.send(status);
                                     break;
