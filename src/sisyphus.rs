@@ -257,12 +257,8 @@ pub trait Boulder: std::fmt::Display + Sized {
     }
 
     /// Returns true if this is the first time the task has run
-    fn first_time(&self, restarts: &Arc<AtomicUsize>) -> bool {
-        if restarts.load(Ordering::Relaxed) == 0 {
-            true
-        } else {
-            false
-        }
+    fn first_time(&self, restarts: &AtomicUsize) -> bool {
+        restarts.load(Ordering::Relaxed) == 0
     }
 
     /// Perform the task
@@ -275,10 +271,13 @@ pub trait Boulder: std::fmt::Display + Sized {
     /// Override this function if your task needs to to boostrap its state before
     /// running spawn
     fn bootstrap(
-        &mut self,
+        mut self,
         _first_time: bool,
-    ) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send + '_>> {
-        Box::pin(async move { Ok(()) })
+    ) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
+    where
+        Self: 'static + Send + Sync + Sized,
+    {
+        Box::pin(async move { Ok(self) })
     }
 
     /// Clean up the task state. This method will be called by the loop when
@@ -286,7 +285,10 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to clean up resources on
     /// an unrecoverable error
-    fn cleanup(&mut self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send + '_>> {
+    fn cleanup(mut self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send>>
+    where
+        Self: 'static + Send + Sync + Sized,
+    {
         Box::pin(async move { Ok(()) })
     }
 
@@ -295,10 +297,12 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to adjust its state when
     /// hitting a recoverable error
-    fn recover(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {})
+    fn recover(mut self) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
+    where
+        Self: 'static + Send + Sync + Sized,
+    {
+        Box::pin(async move { Ok(self) })
     }
-
     /// Run the task until it panics. Errors result in a task restart with the
     /// same channels. This means that an error causes the task to lose only
     /// the data that is in-scope when it faults.
@@ -311,25 +315,26 @@ pub trait Boulder: std::fmt::Display + Sized {
         let (tx, rx) = watch::channel(TaskStatus::Starting);
         let (shutdown_tx, shutdown_recv) = oneshot::channel();
         let shutdown = ShutdownSignal(shutdown_recv);
-        let restarts: Arc<AtomicUsize> = Default::default();
-        let restarts_loop_ref = restarts.clone();
+        let restarts: AtomicUsize = Default::default();
 
         let task: JoinHandle<()> = tokio::spawn(async move {
-            let res = self.bootstrap(self.first_time(&restarts_loop_ref)).await;
-            if let Err(err) = res {
-                let _ = self.cleanup().await;
+            let first_time = self.first_time(&restarts);
+            let res = self.bootstrap(first_time).await;
+            self = if let Err(err) = res {
                 let error_chain = err
                     .chain()
-                    .map(|e| e.to_string())
+                    .map(|e| format!("[{}]", e.to_string()))
                     .collect::<Vec<String>>()
-                    .join(" --> ");
+                    .join("->");
                 tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Error encountered during bootstrap");
                 let _ = tx.send(TaskStatus::Stopped {
                     exceptional: true,
                     err: Arc::new(err),
                 });
                 return;
-            }
+            } else {
+                res.unwrap()
+            };
             let handle = self.spawn(shutdown);
             // tx.send(TaskStatus::Running)
             //     .expect("Failed to send task status");
@@ -345,7 +350,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 if tx.send(TaskStatus::Recovering(Arc::new(err))).is_err() {
                                     break;
                                 }
-                                task.recover().await;
+                                task = task.recover().await.unwrap();
                                 tracing::warn!(
                                     error = e_string.to_string(),
                                     task = task_description.as_str(),
