@@ -137,7 +137,6 @@ impl std::fmt::Display for TaskStatus {
 /// outside world.
 pub struct Sisyphus {
     pub(crate) restarts: Arc<AtomicUsize>,
-    // TODO: anything else we want out?
     pub(crate) status: tokio::sync::watch::Receiver<TaskStatus>,
     pub(crate) shutdown: tokio::sync::oneshot::Sender<()>,
     pub(crate) task: JoinHandle<()>,
@@ -257,7 +256,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     }
 
     /// Returns true if this is the first time the task has run
-    fn first_time(&self, restarts: &AtomicUsize) -> bool {
+    fn first_time(&self, restarts: Arc<AtomicUsize>) -> bool {
         restarts.load(Ordering::Relaxed) == 0
     }
 
@@ -271,7 +270,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     /// Override this function if your task needs to to boostrap its state before
     /// running spawn
     fn bootstrap(
-        mut self,
+        self,
         _first_time: bool,
     ) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
     where
@@ -285,7 +284,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to clean up resources on
     /// an unrecoverable error
-    fn cleanup(mut self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send>>
+    fn cleanup(self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send>>
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -297,7 +296,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to adjust its state when
     /// hitting a recoverable error
-    fn recover(mut self) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
+    fn recover(self) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -315,10 +314,10 @@ pub trait Boulder: std::fmt::Display + Sized {
         let (tx, rx) = watch::channel(TaskStatus::Starting);
         let (shutdown_tx, shutdown_recv) = oneshot::channel();
         let shutdown = ShutdownSignal(shutdown_recv);
-        let restarts: AtomicUsize = Default::default();
-
+        let restarts: Arc<AtomicUsize> = Default::default();
+        let restarts_loop_ref = restarts.clone();
+        let first_time = self.first_time(restarts.clone());
         let task: JoinHandle<()> = tokio::spawn(async move {
-            let first_time = self.first_time(&restarts);
             let res = self.bootstrap(first_time).await;
             self = if let Err(err) = res {
                 let error_chain = err
@@ -360,7 +359,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 (task, shutdown)
                             }
 
-                            Ok(Fall::Unrecoverable { err, exceptional, mut task }) => {
+                            Ok(Fall::Unrecoverable { err, exceptional, task }) => {
                                 let error_chain= err.chain().map(|e| e.to_string()).collect::<Vec<String>>().join(" --> ");
                                 if exceptional {
                                     tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Exceptional unrecoverable error encountered");
@@ -375,7 +374,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 break;
                             }
 
-                            Ok(Fall::Shutdown{mut task}) => {
+                            Ok(Fall::Shutdown{task}) => {
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
