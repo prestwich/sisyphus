@@ -255,11 +255,6 @@ pub trait Boulder: std::fmt::Display + Sized {
         format!("{self}")
     }
 
-    /// Returns true if this is the first time the task has run
-    fn first_time(&self, restarts: Arc<AtomicUsize>) -> bool {
-        restarts.load(Ordering::Relaxed) == 0
-    }
-
     /// Perform the task
     fn spawn(self, shutdown: ShutdownSignal) -> JoinHandle<Fall<Self>>
     where
@@ -269,10 +264,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to to boostrap its state before
     /// running spawn
-    fn bootstrap(
-        self,
-        _first_time: bool,
-    ) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
+    fn bootstrap(self) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -316,9 +308,8 @@ pub trait Boulder: std::fmt::Display + Sized {
         let shutdown = ShutdownSignal(shutdown_recv);
         let restarts: Arc<AtomicUsize> = Default::default();
         let restarts_loop_ref = restarts.clone();
-        let first_time = self.first_time(restarts.clone());
         let task: JoinHandle<()> = tokio::spawn(async move {
-            let res = self.bootstrap(first_time).await;
+            let res = self.bootstrap().await;
             self = if let Err(err) = res {
                 let error_chain = err
                     .chain()
