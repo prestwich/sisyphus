@@ -137,7 +137,6 @@ impl std::fmt::Display for TaskStatus {
 /// outside world.
 pub struct Sisyphus {
     pub(crate) restarts: Arc<AtomicUsize>,
-    // TODO: anything else we want out?
     pub(crate) status: tokio::sync::watch::Receiver<TaskStatus>,
     pub(crate) shutdown: tokio::sync::oneshot::Sender<()>,
     pub(crate) task: JoinHandle<()>,
@@ -256,37 +255,20 @@ pub trait Boulder: std::fmt::Display + Sized {
         format!("{self}")
     }
 
-    /// Returns true if this is the first time the task has run
-    fn first_time(&self, restarts: &Arc<AtomicUsize>) -> bool {
-        if restarts.load(Ordering::Relaxed) == 0 {
-            true
-        } else {
-            false
-        }
-    }
-
     /// Perform the task
     fn spawn(self, shutdown: ShutdownSignal) -> JoinHandle<Fall<Self>>
     where
         Self: 'static + Send + Sync + Sized;
-
-    /// Bootstrap the task state. This method will be called before the task spawn.
-    ///
-    /// Override this function if your task needs to to boostrap its state before
-    /// running spawn
-    fn bootstrap(
-        &mut self,
-        _first_time: bool,
-    ) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send + '_>> {
-        Box::pin(async move { Ok(()) })
-    }
 
     /// Clean up the task state. This method will be called by the loop when
     /// the task is shutting down due to an unrecoverable error
     ///
     /// Override this function if your task needs to clean up resources on
     /// an unrecoverable error
-    fn cleanup(&mut self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send + '_>> {
+    fn cleanup(self) -> Pin<Box<dyn Future<Output = eyre::Result<()>> + Send>>
+    where
+        Self: 'static + Send + Sync + Sized,
+    {
         Box::pin(async move { Ok(()) })
     }
 
@@ -295,14 +277,16 @@ pub trait Boulder: std::fmt::Display + Sized {
     ///
     /// Override this function if your task needs to adjust its state when
     /// hitting a recoverable error
-    fn recover(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {})
+    fn recover(self) -> Pin<Box<dyn Future<Output = eyre::Result<Self>> + Send>>
+    where
+        Self: 'static + Send + Sync + Sized,
+    {
+        Box::pin(async move { Ok(self) })
     }
-
     /// Run the task until it panics. Errors result in a task restart with the
     /// same channels. This means that an error causes the task to lose only
     /// the data that is in-scope when it faults.
-    fn run_until_panic(mut self) -> Sisyphus
+    fn run_until_panic(self) -> Sisyphus
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -313,23 +297,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         let shutdown = ShutdownSignal(shutdown_recv);
         let restarts: Arc<AtomicUsize> = Default::default();
         let restarts_loop_ref = restarts.clone();
-
         let task: JoinHandle<()> = tokio::spawn(async move {
-            let res = self.bootstrap(self.first_time(&restarts_loop_ref)).await;
-            if let Err(err) = res {
-                let _ = self.cleanup().await;
-                let error_chain = err
-                    .chain()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<String>>()
-                    .join(" --> ");
-                tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Error encountered during bootstrap");
-                let _ = tx.send(TaskStatus::Stopped {
-                    exceptional: true,
-                    err: Arc::new(err),
-                });
-                return;
-            }
             let handle = self.spawn(shutdown);
             // tx.send(TaskStatus::Running)
             //     .expect("Failed to send task status");
@@ -345,7 +313,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 if tx.send(TaskStatus::Recovering(Arc::new(err))).is_err() {
                                     break;
                                 }
-                                task.recover().await;
+                                task = task.recover().await.unwrap();
                                 tracing::warn!(
                                     error = e_string.to_string(),
                                     task = task_description.as_str(),
@@ -355,8 +323,8 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 (task, shutdown)
                             }
 
-                            Ok(Fall::Unrecoverable { err, exceptional, mut task }) => {
-                                let error_chain= err.chain().map(|e| e.to_string()).collect::<Vec<String>>().join(" --> ");
+                            Ok(Fall::Unrecoverable { err, exceptional, task }) => {
+                                let error_chain= err.chain().map(|e| format!("[{}]", e.to_string())).collect::<Vec<String>>().join("->");
                                 if exceptional {
                                     tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Exceptional unrecoverable error encountered");
                                 } else {
@@ -366,16 +334,17 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
-                                let _ = tx.send(TaskStatus::Stopped{exceptional, err: Arc::new(err) });
+                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: Arc::new(eyre::eyre!("Shutdown"))});
                                 break;
                             }
 
-                            Ok(Fall::Shutdown{mut task}) => {
+                            Ok(Fall::Shutdown{task}) => {
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
                                 // abort work
                                 handle.abort();
+                                tracing::trace!(task=task_description.as_str(), "Task received shutdown signal and aborted handle");
                                 // then  cleanup
                                 let _ = task.cleanup().await;
                                 // then set status to Stopped
