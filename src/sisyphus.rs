@@ -334,7 +334,7 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 // We don't check the result of the send
                                 // because we're stopping regardless of
                                 // whether it worked
-                                let _ = tx.send(TaskStatus::Stopped{exceptional: false, err: Arc::new(eyre::eyre!("Shutdown"))});
+                                let _ = tx.send(TaskStatus::Stopped{exceptional, err: Arc::new(err)});
                                 break;
                             }
 
