@@ -399,7 +399,7 @@ pub(crate) mod test {
     }
 
     impl Boulder for RecoverableTask {
-        fn spawn(&mut self, shutdown_tx: mpsc::Sender<()>) -> JoinHandle<Fall>
+        fn spawn(&mut self, _shutdown_tx: mpsc::Sender<()>) -> JoinHandle<Fall>
         where
             Self: 'static + Send + Sync + Sized,
         {
@@ -435,7 +435,7 @@ pub(crate) mod test {
     }
 
     impl Boulder for UnrecoverableTask {
-        fn spawn(&mut self, shutdown: mpsc::Sender<()>) -> JoinHandle<Fall> {
+        fn spawn(&mut self, _shutdown: mpsc::Sender<()>) -> JoinHandle<Fall> {
             tokio::spawn(async move {
                 Fall::Unrecoverable {
                     err: eyre::eyre!("Tis only a scratch"),
@@ -466,7 +466,7 @@ pub(crate) mod test {
     }
 
     impl Boulder for PanicTask {
-        fn spawn(&mut self, shutdown: mpsc::Sender<()>) -> JoinHandle<Fall>
+        fn spawn(&mut self, _shutdown: mpsc::Sender<()>) -> JoinHandle<Fall>
         where
             Self: 'static + Send + Sync + Sized,
         {
@@ -514,7 +514,7 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn test_shutdown() {
-        let mut handle = ShutdownTask {}.run_until_panic();
+        let handle = ShutdownTask {}.run_until_panic();
         sleep(Duration::from_millis(1200)).await;
         assert_eq!(
             handle.status().to_string(),
