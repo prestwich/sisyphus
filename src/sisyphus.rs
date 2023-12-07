@@ -419,9 +419,11 @@ pub(crate) mod test {
         let handle = handle.shutdown();
         let result = handle.await;
 
-        assert!(logs_contain("RecoverableTask"));
-        assert!(logs_contain("Restarting task"));
-        assert!(logs_contain("This error was recoverable"));
+        assert!(logs_contain(
+            "error=\"Error 1/1\" error=I only took an arrow to the knee"
+        ));
+        assert!(logs_contain("Task Recovering.."));
+        assert!(logs_contain("Task Restarting ↺"));
         assert!(result.is_ok());
     }
 
