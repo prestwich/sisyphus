@@ -387,6 +387,8 @@ pub trait Boulder: std::fmt::Display + Sized {
 pub(crate) mod test {
     use std::time::Duration;
 
+    use tokio::time::sleep;
+
     use super::*;
 
     struct RecoverableTask;
@@ -453,34 +455,72 @@ pub(crate) mod test {
         assert!(logs_contain("Task Cleaning up.."));
         assert!(logs_contain("Task Shutting down Ⓧ"));
     }
+
+    struct PanicTask;
+    impl std::fmt::Display for PanicTask {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "PanicTask")
+        }
+    }
+
+    impl Boulder for PanicTask {
+        fn spawn(&mut self, shutdown: mpsc::Sender<()>) -> JoinHandle<Fall>
+        where
+            Self: 'static + Send + Sync + Sized,
+        {
+            tokio::spawn(async move { panic!("intentional panic :)") })
+        }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn test_panic() {
+        let handle = PanicTask.run_until_panic();
+        let result = handle.await;
+        assert!(logs_contain("PanicTask"));
+        assert!(logs_contain("Internal task panicked task=\"PanicTask\""));
+        assert!(result.is_err() && result.unwrap_err().is_panic());
+    }
+    struct ShutdownTask {}
+
+    impl std::fmt::Display for ShutdownTask {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "ShutdownTask")
+        }
+    }
+
+    impl Boulder for ShutdownTask {
+        fn spawn(&mut self, shutdown_tx: mpsc::Sender<()>) -> JoinHandle<Fall>
+        where
+            Self: 'static + Send + Sync + Sized,
+        {
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(1)) => {
+                            shutdown_tx.send(()).await.unwrap();
+                            sleep(Duration::from_secs(1)).await
+                        },
+                    }
+                }
+                Fall::Recoverable {
+                    err: eyre::eyre!("Shutdown received"),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shutdown() {
+        let mut handle = ShutdownTask {}.run_until_panic();
+        sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            handle.status().to_string(),
+            TaskStatus::Stopped {
+                exceptional: false,
+                err: Arc::new(eyre::Report::msg("Shutdown"))
+            }
+            .to_string()
+        );
+    }
 }
-//     struct PanicTask;
-//     impl std::fmt::Display for PanicTask {
-//         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//             write!(f, "PanicTask")
-//         }
-//     }
-
-//     impl Boulder for PanicTask {
-//         fn recover(&mut self) {}
-
-//         fn cleanup(&mut self) {}
-
-//         fn spawn(self) -> JoinHandle<Fall<Self>>
-//         where
-//             Self: 'static + Send + Sync + Sized,
-//         {
-//             tokio::spawn(async move { panic!("intentional panic :)") })
-//         }
-//     }
-
-//     #[tokio::test]
-//     #[tracing_test::traced_test]
-//     async fn test_panic() {
-//         let handle = PanicTask.run_until_panic();
-//         let result = handle.await;
-//         assert!(logs_contain("PanicTask"));
-//         assert!(logs_contain("Internal task panicked"));
-//         assert!(result.is_err() && result.unwrap_err().is_panic());
-//     }
-// }
