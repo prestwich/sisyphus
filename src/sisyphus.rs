@@ -11,10 +11,11 @@ use std::{
 
 use futures::FutureExt;
 use tokio::{
-    select,
-    sync::{oneshot, watch, Mutex},
+    pin, select,
+    sync::{mpsc, watch, Mutex},
     task::JoinHandle,
 };
+use tracing::Instrument;
 
 use crate::utils;
 
@@ -127,7 +128,7 @@ impl std::fmt::Display for TaskStatus {
 pub struct Sisyphus {
     pub(crate) restarts: Arc<AtomicUsize>,
     pub(crate) status: tokio::sync::watch::Receiver<TaskStatus>,
-    pub(crate) shutdown: tokio::sync::oneshot::Sender<()>,
+    pub(crate) shutdown: tokio::sync::mpsc::Sender<()>,
     pub(crate) task: JoinHandle<()>,
 }
 
@@ -174,14 +175,16 @@ impl IntoFuture for Sisyphus {
 
 #[derive(Debug)]
 /// The shutdown signal for the task
-pub struct ShutdownSignal(oneshot::Receiver<()>);
+pub struct ShutdownSignal(mpsc::Receiver<()>);
 
 impl Future for ShutdownSignal {
-    type Output = Result<(), oneshot::error::RecvError>;
+    type Output = Result<(), eyre::Report>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.0.poll_unpin(cx) {
-            Poll::Ready(res) => Poll::Ready(res),
+        let fut = self.0.recv();
+        pin!(fut);
+        match fut.poll_unpin(cx) {
+            Poll::Ready(res) => Poll::Ready(res.ok_or(eyre::Report::msg("mpsc closed"))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -230,7 +233,7 @@ pub trait Boulder: std::fmt::Display + Sized {
     }
 
     /// Perform the task
-    fn spawn(&mut self) -> JoinHandle<Fall>
+    fn spawn(&mut self, shutdown_tx: mpsc::Sender<()>) -> JoinHandle<Fall>
     where
         Self: 'static + Send + Sync + Sized;
 
@@ -264,7 +267,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         let task_description = self.task_description();
 
         let (tx, rx) = watch::channel(TaskStatus::Starting);
-        let (shutdown_tx, shutdown_recv) = oneshot::channel();
+        let (shutdown_tx, shutdown_recv) = mpsc::channel(1);
         let mut shutdown = ShutdownSignal(shutdown_recv);
         let restarts: Arc<AtomicUsize> = Default::default();
         let restarts_loop_ref = restarts.clone();
@@ -272,8 +275,11 @@ pub trait Boulder: std::fmt::Display + Sized {
         let running_task = cleanup_task.clone();
         tx.send(TaskStatus::Running)
             .expect("Failed to send task status");
+        let shutdown_tx2 = shutdown_tx.clone();
+        let shutdown_tx3 = shutdown_tx.clone();
+        let shutdown_tx4 = shutdown_tx.clone();
         let task: JoinHandle<()> = tokio::spawn(async move {
-            let handle = running_task.lock_owned().await.spawn();
+            let handle = running_task.lock_owned().await.spawn(shutdown_tx2);
             tokio::pin!(handle);
             loop {
                 select! {
@@ -294,33 +300,37 @@ pub trait Boulder: std::fmt::Display + Sized {
                     result = &mut handle => {
                         match result {
                             Ok(Fall::Recoverable { err }) => {
-                                // Sisyphus has been dropped, so we can drop this task
-                                let e_string = err.to_string();
-                                let error_chain= err.chain().map(|e| e.to_string()).collect::<Vec<String>>().join(" --> ");
+                                let span = tracing::warn_span!("recoverable", task = task_description);
+                                let _enter = span.enter();
+                                let total = err.chain().len();
+                                for (mut index, error) in err.chain().enumerate() {
+                                    index+=1;
+                                    tracing::warn!(error = format!("Error {index}/{total}"), error);
+                                }
                                 if tx.send(TaskStatus::Recovering(Arc::new(err))).is_err() {
                                     break;
                                 }
-                                cleanup_task.lock().await.recover().await.unwrap();
-                                tracing::warn!(
-                                    error = e_string.to_string(),
-                                    task = task_description.as_str(),
-                                    error_chain,
-                                    "Restarting task ↺",
-                                );
+                                tracing::warn!("Task Recovering...");
+                                cleanup_task.lock().await.recover().instrument(span.clone()).await.unwrap();
+                                tracing::warn!("Task Restarting ↺");
                             }
 
                             Ok(Fall::Unrecoverable { err, exceptional}) => {
-                                let error_chain= err.chain().map(|e| format!("[{}]", e.to_string())).collect::<Vec<String>>().join("->");
-                                if exceptional {
-                                    tracing::error!(err = %err, error_chain, task = task_description.as_str(), "Exceptional unrecoverable error encountered");
-                                } else {
-                                    tracing::warn!(err = %err, error_chain, task = task_description.as_str(), "Unrecoverable error encountered");
+                                let span = tracing::warn_span!("unrecoverable", task = task_description);
+                                let _enter = span.enter();
+                                let total = err.chain().len();
+                                for (mut index, error) in err.chain().enumerate() {
+                                    index+=1;
+                                    if exceptional {
+                                        tracing::error!(exceptional, error, "Error {index}/{total}");
+                                    } else {
+                                        tracing::warn!(exceptional, error, "Error {index}/{total}");
+                                    }
                                 }
-                                let _ = cleanup_task.lock().await.cleanup().await;
-                                // We don't check the result of the send
-                                // because we're stopping regardless of
-                                // whether it worked
+                                tracing::warn!("Task Cleaning up..");
+                                let _ = cleanup_task.lock().await.cleanup().instrument(span.clone()).await;
                                 let _ = tx.send(TaskStatus::Stopped{exceptional, err: Arc::new(err)});
+                                tracing::warn!("Task Shutting down Ⓧ");
                                 break;
                             }
 
@@ -352,14 +362,13 @@ pub trait Boulder: std::fmt::Display + Sized {
                                 panic::resume_unwind(p);
                             },
                         };
-                        println!("starting again");
                         // We use a noisy sleep here to nudge tasks off
                         // eachother if they're crashing around the same time
                         utils::noisy_sleep(cleanup_task.lock().await.restart_after_ms()).await;
                         // If we haven't broken from within the match, increment
                         // restarts and push the boulder again.
                         restarts_loop_ref.fetch_add(1, Ordering::Relaxed);
-                        *handle = cleanup_task.lock().await.spawn();
+                        *handle = cleanup_task.lock().await.spawn(shutdown_tx3.clone());
                     },
 
                 }
@@ -368,7 +377,7 @@ pub trait Boulder: std::fmt::Display + Sized {
         Sisyphus {
             restarts,
             status: rx,
-            shutdown: shutdown_tx,
+            shutdown: shutdown_tx4,
             task,
         }
     }
@@ -388,13 +397,13 @@ pub(crate) mod test {
     }
 
     impl Boulder for RecoverableTask {
-        fn spawn(&mut self) -> JoinHandle<Fall>
+        fn spawn(&mut self, shutdown_tx: mpsc::Sender<()>) -> JoinHandle<Fall>
         where
             Self: 'static + Send + Sync + Sized,
         {
             tokio::spawn(async move {
                 Fall::Recoverable {
-                    err: eyre::eyre!("This error was recoverable"),
+                    err: eyre::eyre!("I only took an arrow to the knee"),
                 }
             })
         }
@@ -422,10 +431,10 @@ pub(crate) mod test {
     }
 
     impl Boulder for UnrecoverableTask {
-        fn spawn(&mut self) -> JoinHandle<Fall> {
+        fn spawn(&mut self, shutdown: mpsc::Sender<()>) -> JoinHandle<Fall> {
             tokio::spawn(async move {
                 Fall::Unrecoverable {
-                    err: eyre::eyre!("This error was unrecoverable"),
+                    err: eyre::eyre!("Tis only a scratch"),
                     exceptional: true,
                 }
             })
@@ -435,10 +444,14 @@ pub(crate) mod test {
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_unrecoverable() {
-        let mut handle = UnrecoverableTask.run_until_panic();
+        let handle = UnrecoverableTask.run_until_panic();
         tokio::time::sleep(Duration::from_millis(500)).await;
         let _ = handle.await;
-        assert!(logs_contain("example"));
+        assert!(logs_contain(
+            "Error 1/1 exceptional=true error=Tis only a scratch"
+        ));
+        assert!(logs_contain("Task Cleaning up.."));
+        assert!(logs_contain("Task Shutting down Ⓧ"));
     }
 }
 //     struct PanicTask;
